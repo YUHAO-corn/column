@@ -1,0 +1,62 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import QAItem from "../../components/QAItem.astro";
+import {
+  getTopicSummaries,
+  getTopicQAs,
+  type QADecision,
+  type TopicSummary
+} from "../../utils/content";
+
+export function getStaticPaths() {
+  return getTopicSummaries().map((topic) => ({
+    params: { topic: topic.slug },
+    props: {
+      topic,
+      qas: getTopicQAs(topic.slug)
+    }
+  }));
+}
+
+const { topic, qas } = Astro.props as { topic: TopicSummary; qas: QADecision[] };
+---
+
+<Layout
+  title={`${topic.title} - AI 产品决策专栏`}
+  description={topic.description}
+>
+  <a class="back-link" href="/">← 返回首页</a>
+
+  <section class="hero-panel mt-3 animate-lift-in">
+    <div class="hero-label">{topic.slug}</div>
+    <h1 class="hero-title">{topic.title}</h1>
+    <p class="hero-desc">{topic.description}</p>
+    <div class="topic-stats mt-4">
+      <span class="tiny-tag">{topic.docsCount} 篇原始文档</span>
+      <span class="tiny-tag">{topic.qaCount} 个决策 QA</span>
+    </div>
+  </section>
+
+  <section class="mt-7">
+    <h2 class="section-title">决策列表</h2>
+    <p class="section-sub">按文档原始顺序展开，每条都可进入查看完整讨论内容</p>
+
+    {
+      qas.length ? (
+        <div class="qa-list">
+          {qas.map((qa) => (
+            <QAItem
+              href={`/${qa.topic}/${qa.slug}/`}
+              questionTag={qa.questionTag}
+              question={qa.question}
+              preview={qa.preview}
+              docTitle={qa.docTitle}
+            />
+          ))}
+        </div>
+      ) : (
+        <div class="empty-tip">当前主题还没有可展示的 QA 内容。</div>
+      )
+    }
+  </section>
+</Layout>

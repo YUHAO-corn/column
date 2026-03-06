@@ -1,0 +1,271 @@
+---
+import { getAllQAs, getTopicSummaries } from "../utils/content";
+import { renderDecisionMarkdown } from "../utils/markdown";
+import { SITE_META } from "../utils/site-meta";
+
+const allQAs = getAllQAs();
+const topics = getTopicSummaries();
+const totalCount = allQAs.length;
+---
+
+<section id="read" class="mt-7">
+  <h2 id="read-start" class="section-title">连续阅读</h2>
+  <p class="section-sub">
+    仪表盘下直接进入内容区。点击条目原地展开详情，然后直接读下一条，不再跳转页面。
+  </p>
+
+  <section class="flow-shell mt-4">
+    <aside class="flow-sidebar">
+      <div class="flow-side-sticky">
+        <h3 class="section-title">过滤与导航</h3>
+        <p class="section-sub">共 {totalCount} 条 QA 决策，可按主题快速筛选</p>
+        <div class="flow-filter-group mt-3">
+          <button type="button" class="flow-filter is-active" data-topic="all">
+            全部主题 · {totalCount}
+          </button>
+          {
+            topics
+              .filter((topic) => topic.qaCount > 0)
+              .map((topic) => (
+                <button type="button" class="flow-filter" data-topic={topic.slug}>
+                  {topic.title} · {topic.qaCount}
+                </button>
+              ))
+          }
+        </div>
+        <div class="empty-tip mt-4">
+          快捷键：<code>N</code>/<code>J</code> 下一条，<code>Shift+N</code>/<code>K</code> 上一条
+        </div>
+      </div>
+    </aside>
+
+    <div class="flow-main">
+      <div class="flow-toolbar">
+        <input id="flowSearch" class="flow-search" type="search" placeholder="搜索问题标题、结论关键词…" />
+        <button id="continueReading" type="button" class="nav-chip nav-chip-large">
+          继续阅读
+        </button>
+        <div id="flowProgress" class="flow-progress">1 / {totalCount}</div>
+      </div>
+
+      <div id="flowStream" class="flow-stream">
+        {
+          allQAs.map((qa, index) => {
+            const bodyHtml = renderDecisionMarkdown(qa.body);
+            return (
+              <article
+                class={`flow-card ${index === 0 ? "is-current" : ""}`}
+                data-qa-id={qa.id}
+                data-topic={qa.topic}
+                data-index={index}
+              >
+                <button
+                  type="button"
+                  class="flow-toggle"
+                  aria-expanded={index === 0 ? "true" : "false"}
+                >
+                  <div class="flow-card-head">
+                    <span class="tiny-tag">{qa.topicTitle}</span>
+                    <span class="tiny-tag">{qa.questionTag}</span>
+                    <span class="tiny-tag">{qa.docTitle}</span>
+                  </div>
+                  <h3 class="flow-title">{qa.question}</h3>
+                  <p class="flow-meta">
+                    <span>{SITE_META.status}</span>
+                    <span>{SITE_META.stage}</span>
+                    <span>最近更新 {SITE_META.lastUpdated}</span>
+                  </p>
+                  <p class={`flow-decision ${qa.decision ? "" : "is-missing"}`}>
+                    <span class="flow-decision-label">核心决策</span>
+                    <span>{qa.decision ?? "未提炼（建议补充：**结论：一句话**）"}</span>
+                  </p>
+                  {qa.preview ? <p class="flow-preview">{qa.preview}</p> : null}
+                </button>
+
+                <div class={`flow-body ${index === 0 ? "is-open" : ""}`} set:html={bodyHtml} />
+              </article>
+            );
+          })
+        }
+      </div>
+
+      <div id="flowEmpty" class="empty-tip mt-4" hidden>
+        当前筛选没有命中内容，试试清空搜索词或切换主题。
+      </div>
+    </div>
+  </section>
+
+  <div class="flow-dock">
+    <button type="button" id="prevQA" class="nav-chip nav-chip-large">
+      <span class="dock-btn-icon">←</span> 上一条 <kbd class="dock-kbd">K</kbd>
+    </button>
+    <div id="flowDockProgress" class="flow-progress">1 / {totalCount}</div>
+    <button type="button" id="nextQA" class="nav-chip nav-chip-primary">
+      下一条 <kbd class="dock-kbd">J</kbd> <span class="dock-btn-icon">→</span>
+    </button>
+  </div>
+</section>
+
+<script is:inline>
+  (() => {
+    const storageKey = "column.readflow.state.v3";
+    const cards = Array.from(document.querySelectorAll(".flow-card"));
+    const filterButtons = Array.from(document.querySelectorAll(".flow-filter"));
+    const progress = document.getElementById("flowProgress");
+    const dockProgress = document.getElementById("flowDockProgress");
+    const flowEmpty = document.getElementById("flowEmpty");
+    const searchInput = document.getElementById("flowSearch");
+    const prevButton = document.getElementById("prevQA");
+    const nextButton = document.getElementById("nextQA");
+    const continueButton = document.getElementById("continueReading");
+
+    const state = {
+      topic: "all",
+      query: "",
+      currentId: cards[0]?.dataset.qaId || ""
+    };
+
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // Keep only reading position. Always reset filters on fresh load.
+        if (typeof parsed.currentId === "string") state.currentId = parsed.currentId;
+      }
+    } catch {}
+
+    let visibleCards = [];
+
+    const save = () => {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify({ currentId: state.currentId }));
+      } catch {}
+    };
+
+    const getCurrent = () =>
+      visibleCards.find((card) => card.dataset.qaId === state.currentId) || visibleCards[0] || null;
+
+    const updateProgress = () => {
+      const current = getCurrent();
+      const total = visibleCards.length;
+      const index = current ? visibleCards.indexOf(current) + 1 : 0;
+      const text = total ? `${index} / ${total}` : "0 / 0";
+      if (progress) progress.textContent = text;
+      if (dockProgress) dockProgress.textContent = text;
+    };
+
+    const scrollCardToReadableStart = (card) => {
+      if (!card) return;
+      const topbar = document.querySelector(".site-header");
+      const toolbar = document.querySelector(".flow-toolbar");
+      const topbarHeight = topbar instanceof HTMLElement ? topbar.offsetHeight : 0;
+      const toolbarHeight = toolbar instanceof HTMLElement ? toolbar.offsetHeight : 0;
+      const gap = 14;
+      const offset = topbarHeight + toolbarHeight + gap;
+      const absoluteTop = window.scrollY + card.getBoundingClientRect().top;
+      const targetTop = Math.max(0, absoluteTop - offset);
+      window.scrollTo({ top: targetTop, behavior: "smooth" });
+    };
+
+    const openCard = (target, shouldScroll) => {
+      cards.forEach((card) => {
+        const open = card === target;
+        const body = card.querySelector(".flow-body");
+        const toggle = card.querySelector(".flow-toggle");
+        card.classList.toggle("is-current", open);
+        if (body) body.classList.toggle("is-open", open);
+        if (toggle) toggle.setAttribute("aria-expanded", String(open));
+      });
+
+      state.currentId = target?.dataset.qaId || "";
+      updateProgress();
+      save();
+
+      if (shouldScroll && target) {
+        scrollCardToReadableStart(target);
+      }
+    };
+
+    const refreshFilters = (scrollToCurrent) => {
+      visibleCards = [];
+      const normalizedQuery = state.query.trim().toLowerCase();
+
+      cards.forEach((card) => {
+        const topicMatch = state.topic === "all" || card.dataset.topic === state.topic;
+        const text = card.textContent?.toLowerCase() || "";
+        const queryMatch = !normalizedQuery || text.includes(normalizedQuery);
+        const visible = topicMatch && queryMatch;
+        card.hidden = !visible;
+        if (visible) visibleCards.push(card);
+      });
+
+      filterButtons.forEach((button) => {
+        button.classList.toggle("is-active", button.dataset.topic === state.topic);
+      });
+
+      if (!visibleCards.length) {
+        if (flowEmpty) flowEmpty.hidden = false;
+        updateProgress();
+        return;
+      }
+
+      if (flowEmpty) flowEmpty.hidden = true;
+      const current = getCurrent();
+      openCard(current, scrollToCurrent);
+    };
+
+    const move = (step) => {
+      const current = getCurrent();
+      if (!current) return;
+      const index = visibleCards.indexOf(current);
+      const nextIndex = Math.max(0, Math.min(visibleCards.length - 1, index + step));
+      openCard(visibleCards[nextIndex], true);
+    };
+
+    cards.forEach((card) => {
+      const toggle = card.querySelector(".flow-toggle");
+      toggle?.addEventListener("click", () => openCard(card, true));
+    });
+
+    filterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        state.topic = button.dataset.topic || "all";
+        refreshFilters(true);
+        save();
+      });
+    });
+
+    searchInput?.addEventListener("input", () => {
+      state.query = searchInput.value || "";
+      refreshFilters(false);
+      save();
+    });
+
+    prevButton?.addEventListener("click", () => move(-1));
+    nextButton?.addEventListener("click", () => move(1));
+    continueButton?.addEventListener("click", () => {
+      const current = getCurrent();
+      current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    document.addEventListener("keydown", (event) => {
+      const target = event.target;
+      const inInput =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable;
+
+      if (inInput) return;
+
+      if (event.key.toLowerCase() === "j" || (event.key.toLowerCase() === "n" && !event.shiftKey)) {
+        event.preventDefault();
+        move(1);
+      } else if (event.key.toLowerCase() === "k" || (event.key.toLowerCase() === "n" && event.shiftKey)) {
+        event.preventDefault();
+        move(-1);
+      }
+    });
+
+    refreshFilters(false);
+  })();
+</script>

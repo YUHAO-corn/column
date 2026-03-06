@@ -1,0 +1,63 @@
+---
+import Layout from "../../layouts/Layout.astro";
+import QAItem from "../../components/QAItem.astro";
+import { renderDecisionMarkdown } from "../../utils/markdown";
+import { getAllQAs, getRelatedQAs, type QADecision } from "../../utils/content";
+import { SITE_META } from "../../utils/site-meta";
+
+export function getStaticPaths() {
+  return getAllQAs().map((qa) => ({
+    params: { topic: qa.topic, slug: qa.slug },
+    props: {
+      qa,
+      related: getRelatedQAs(qa.topic, qa.slug, 5)
+    }
+  }));
+}
+
+const { qa, related } = Astro.props as { qa: QADecision; related: QADecision[] };
+const bodyHtml = renderDecisionMarkdown(qa.body);
+---
+
+<Layout
+  title={`${qa.question} - ${qa.topicTitle}`}
+  description={qa.preview}
+>
+  <div class="flex items-center gap-2 flex-wrap">
+    <a class="back-link" href={`/${qa.topic}/`}>← 返回主题</a>
+    <a class="back-link" href="/">回首页</a>
+  </div>
+
+  <section class="decision-shell mt-3 animate-lift-in">
+    <p class="hero-label">{qa.topicTitle}</p>
+    <h1 class="decision-title">{qa.question}</h1>
+    <div class="decision-info">
+      <span class="tiny-tag">{qa.questionTag}</span>
+      <span class="tiny-tag">{qa.docTitle}</span>
+      <span class="tiny-tag">{SITE_META.status}</span>
+      <span class="tiny-tag">{SITE_META.stage}</span>
+      <span class="tiny-tag">最近更新 {SITE_META.lastUpdated}</span>
+    </div>
+    <article class="decision-article" set:html={bodyHtml} />
+  </section>
+
+  {
+    related.length ? (
+      <section class="mt-7">
+        <h2 class="section-title">相关决策</h2>
+        <p class="section-sub">同一主题下你可能还会关心这些问题</p>
+        <div class="qa-list">
+          {related.map((item) => (
+            <QAItem
+              href={`/${item.topic}/${item.slug}/`}
+              questionTag={item.questionTag}
+              question={item.question}
+              preview={item.preview}
+              docTitle={item.docTitle}
+            />
+          ))}
+        </div>
+      </section>
+    ) : null
+  }
+</Layout>

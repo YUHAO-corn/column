@@ -1,0 +1,795 @@
+---
+title: "技能系统设计"
+topic: "skill-system"
+---
+
+# 技能系统设计
+
+> 记录技能系统的设计决策，包括技能选择、内容注入、推荐机制等核心交互。
+
+---
+
+## Q1: 技能选择的粒度是什么？
+
+**结论：我们最后选A，全局选择。**
+
+讨论过的方案：
+- A: 全局选择 — 勾选对所有会话生效
+- B: 按会话选择 — 每个 session 独立技能组合
+- C: 全局默认 + 会话可覆盖
+
+我们最后选 A。
+- YAGNI — 先跑通最小链路
+- 目标用户是非技术人群，全局开关最直观
+- 后续需要再加会话级覆盖
+
+## Q2: 技能内容怎么注入到 agent？
+
+**结论：我们最后选A，拼接到 prompt。**
+
+讨论过的方案：
+- A: 拼接到 prompt — `skillContent + "\n\n" + userMessage`
+- B: 作为 system prompt 参数注入
+
+我们最后选 A。
+- 当前 SDK 的 `query()` 只暴露 `prompt` 参数，没有 system prompt 入口
+- craft-agent 也是类似做法
+- 最低成本，不需要改 SDK 调用方式
+
+## Q3: 技能的默认选中状态？
+
+**结论：我们最后选A，全部默认选中。**
+
+讨论过的方案：
+- A: 全部默认选中，不想用的手动关
+- B: 全部默认不选，需手动勾选
+- C: 根据 SKILL.md 的 enabled 字段决定
+
+我们最后选 A。
+- 目标用户是非技术人群，装了技能就应该直接能用
+- 减少操作步骤
+
+## Q4: 选择状态怎么持久化？
+
+**结论：我们最后选A，存到 config 文件（复用现有 saveConfig/loadConfig）。**
+
+讨论过的方案：
+- A: 存到 config 文件（复用现有 saveConfig/loadConfig）
+- B: 存到 localStorage
+- C: 存到 skill 目录的 meta 文件
+
+我们最后选 A。
+- 复用现有的 config 持久化机制，零额外基础设施
+- 因为默认全选，只需要记录“被关掉的技能”即可
+- localStorage 清缓存就没了，不够可靠
+
+## Q5: 技能列表什么时候刷新？
+
+**结论：我们最后选B，启动时加载 + SkillsPopup 打开时刷新。**
+
+讨论过的方案：
+- A: 仅 app 启动时加载
+- B: 启动时加载 + SkillsPopup 打开时刷新
+- C: 文件系统监听（fs.watch）实时检测
+
+我们最后选 B。
+- 成本很低（打开弹窗时多一次 IPC 调用）
+- 体验明显好于仅启动加载（用户新装技能不用重启）
+- 比 fs.watch 简单得多，YAGNI
+
+## Q6: 技能内容注入方式需要修正吗？
+
+**结论：不做任何 skill 内容加载/注入，启动时加载所有 skill 完整内容到 renderer。**
+
+原实现（Q2 的结论）：
+- 启动时加载所有 skill 完整内容到 renderer
+- 每次发消息时，把所有启用 skill 的 content 拼到 prompt 前面
+- 问题：每条消息都带全部 skill 内容，浪费 token；且不符合官方设计
+
+官方 Claude Code Skills 的三阶段机制：
+- **发现**：启动时只加载 name + description 元数据
+- **激活**：用户请求匹配 skill 描述时，Claude 自己决定调用 Skill tool
+- **执行**：此时才加载 SKILL.md 完整内容
+
+craft-agent 的做法：
+- 把目录作为 plugin 传给 SDK：`plugins: [{ type: 'local', path: workspaceRoot }]`
+- SDK 内置 Skill tool，自动处理发现→激活→执行
+- craft-agent 自己不做任何 skill 内容加载/注入
+
+修正方案：
+- 在 DeskhandAgent 的 SDK options 中添加 插件目录配置，传入 Claude 本地数据目录 和 Deskhand 本地目录
+- 如果用户选了 workspace，也传入 workspace 路径
+- 删除 InputToolbar 中的 prompt 拼接逻辑
+- 删除 技能开关状态 和相关持久化（SDK 管理激活，不需要手动开关）
+- 保留 技能加载 IPC 和 技能列表状态 用于 UI 展示（SkillsPopup 显示可用技能列表）
+
+- 符合官方设计，按需加载节省 token
+- 复用 SDK 内置能力，不造轮子
+- Skill 调用会作为 tool_start/tool_result 事件出现在消息流中
+
+## Q7: 如何让用户知道 skill 被使用了？
+
+**结论：我们最后选A，在 activity tree 中展示（和 Read/Write/Bash 等工具一样）。**
+
+讨论过的方案：
+- A: 在 activity tree 中展示（和 Read/Write/Bash 等工具一样）
+- B: 单独的 skill 激活通知
+- C: 在消息气泡中标注
+
+我们最后选 A。
+- SDK 的 Skill tool 调用会产生 `tool_start` 和 `tool_result` 事件
+- 现有的 ToolActivityRow 已经支持渲染任意工具调用
+- 只需添加 Skill 的图标和描述提取逻辑
+- 用户体验一致：所有 agent 行为都在同一个 activity tree 中可见
+
+实现：
+- ToolActivityRow 的 ToolIcon 添加 `Skill` case（扳手图标）
+- getToolDescription 添加 `Skill` case（显示 skill 名称）
+
+## Q8: Claude Code 已有 skills 是否自动兼容？
+
+**结论：Deskhand 会自动扫描 Claude 默认 skills 目录，实现现有 skills 的即插即用兼容。**
+
+发现：切换到 SDK plugin 机制（Q6）后，Deskhand 扫描 Claude 默认 skills 目录 目录，这和 Claude Code CLI 使用的是同一套位置。
+
+效果：
+- 用户在 Claude Code 中已配置的 skills，打开 Deskhand 后直接可用
+- 无需任何迁移、导入或重新配置
+- SkillsPopup 中会自动列出这些 skills
+- Claude 在对话中会按需激活它们（三阶段机制不变）
+
+为什么值得记录：
+- 对从 Claude Code 迁移过来的用户，体验是无缝的
+- 降低了产品的上手门槛——"装了就能用"
+- 这不是刻意设计的功能，而是选择正确架构（复用 SDK plugin 系统）的自然结果
+
+## Q9: 非技术用户如何获取和安装 skills？
+
+**结论：我们最后选A，对话开场提示（嵌入聊天区顶部）。**
+
+**状态：brainstorming 进行中，尚未结论。**
+
+### 问题背景
+
+当前用户获取 skill 的方式：手动找到 skill → 下载/clone → 放到正确目录。对非技术用户来说门槛太高。类比：如果 Claude Code 要求用户自己去找依赖、下载、判断要不要用，体验会很差。
+
+### 候选方案（6 个）
+
+**1. 内置精选 Skills（开箱即用）**
+- 打包精选 SKILL.md 进 app，首次启动复制到 Deskhand 专属 skills 目录
+- 优点：零门槛，离线可用，质量可控
+- 缺点：种类有限，更新绑定发版
+- 工程量：低
+
+**2. Agent 自主获取（用户无感）** ❌ 已排除
+- Agent 自动判断+下载+安装，用户不感知
+- 排除原因：安全风险；skill 元数据膨胀会降低 AI 判断质量（选择困难）
+
+**3. Agent 搜索+展示+用户确认（find-skills 模式）**
+- 内置 find-skills skill，agent 搜索 skills.sh 生态，展示结果，用户确认后安装
+- 参考：https://github.com/vercel-labs/skills/blob/main/skills/find-skills/
+- 优点：复用现有生态，用户有选择权，agent 处理技术细节
+- 缺点：依赖 skills.sh 生态质量，需处理 Electron 中的 CLI 调用
+- 待讨论：搜索结果质量参差不齐时，agent 推荐质量也会受影响
+
+**4. 应用内 Skill 商店** ❌ 已排除
+- 类似 VS Code Extension Marketplace
+- 排除原因：本质是软件时代应用商店思路，把"去 GitHub 找"换成"去商店找"，用户认知负担没变。不是最佳解。
+
+**5. Skill Recommend（行为分析推荐）**
+- 分析用户历史对话 → 匹配 skill 目录 → 在对话外 UI 推荐
+- 优点：主动式，个性化
+- 缺点：推荐不准会烦人，需要 skill 目录匹配，需要对话外 UI
+- 工程量：中-高
+
+**6. Skill Auto-Create（自动生成）**
+- 检测用户反复做的事 → 自动生成 SKILL.md → 下次自动激活
+- 优点：真正个性化，创造市场上不存在的 skill，最有差异化
+- 缺点：生成质量不确定，需要模式检测，隐私顾虑
+- 工程量：高
+
+### 早期倾向（已修正，保留作为思路记录）
+
+- ~~1（内置精选）作为地基，几乎确定要做~~
+- ~~3（find-skills）作为桥梁，但对外部生态质量有顾虑~~
+- ~~5 vs 6 需要进一步讨论——推荐别人的 skill vs 自己生成 skill~~
+- ~~核心张力：**从外部获取** vs **系统自己生长**，哪个更适合非技术用户？~~
+
+修正：之前错误地把 1（内置）归类为"服务知道 skill 的用户"。实际上内置 skills 恰恰服务不知道 skill 的用户——默认配置让 AI 遇到匹配场景自然使用，用户无需知情。
+
+### 战略分层（关键洞察）
+
+**深度用户（知道 skill，红海）**：
+- 他们自己会获取 skills，也知道主动让 AI 去 find
+- 用运营手段解决（文档、推荐优质源、社区分享），不需要产品投入
+
+**浅层用户（不知道 skill，蓝海）**：
+- 他们只会说"帮我做 XX"，不知道也不关心 skill 的存在
+- 可以享受默认预设的通用 skill（哪怕自己不知情）
+- 这批用户是产品要服务的核心对象
+
+### 结论
+
+**1（内置精选）✅ 确定做**
+- 服务对象：浅层用户
+- 实现：增加优质通用 skills 作为默认配置
+- 用户无需知道 skill 的存在，AI 遇到匹配场景自然使用
+
+**3（find-skills）✅ 确定做**
+- 服务对象：深度用户
+- 实现：将 find-skills 作为默认配置的 skill 之一
+- 深度用户主动说"帮我找个做 XX 的 skill"时，agent 自动搜索+安装
+
+**5+6（Skill Insight Agent）✅ 设计完成**
+
+5（推荐已有 skill）和 6（自动生成 skill）合并为同一个 agent——目标相同（洞察用户行为、提升效率），只是手段不同。agent 自己判断走哪条路径。
+
+#### 为什么合并？
+
+最初把 5 和 6 当作两个独立功能讨论。但深入思考后发现：两者的输入相同（用户行为模式），触发条件相同（发现有价值的模式），呈现方式相同（需要告知用户）。区别只在输出——推荐现成的还是生成新的。这是同一个 agent 的两个分支，不是两个系统。
+
+#### 通知形式：为什么是新 session 而不是 UI 组件？
+
+讨论过的方案：
+- A: 对话开场提示（嵌入聊天区顶部）
+- B: 侧边栏洞察卡片（独立 UI 区域）
+- C: 周期性摘要消息（特殊系统消息）
+- D: 新 session + 未读提醒
+
+选择 D，关键思考：A 和 B 都是传统 UI 做法，不够 AI Native。问题在于——如果用户看到推荐后想说"这个方向对但还需要微调"，静态卡片或提示做不到。新 session 的本质是把"推荐"变成一次对话，用户可以直接回复、讨论、修改。类似微信/Instagram 的系统消息机制，用户看到未读提醒，打开就是一个可以互动的对话。而且业务逻辑上，对于我们而言只是创建了一个新的session并且给他安排了任务，额外的开发成本小，用户体验好。
+
+#### 触发条件：为什么是固定周期？
+
+讨论过的方案：
+- A: 固定周期（每周/每 N 次对话）+ 质量门槛
+- B: 阈值触发（某行为出现 X 次以上）
+- C: 用户可配置周期
+
+我们最后选 A。B 听起来更智能，但"什么算一个模式"本身很难定义（同样指令 3 次？相似意图 5 次？），实现复杂度高。A 更简单——定期跑分析，加质量门槛：没有有价值的发现就不创建 session。用户感知上像 B（"系统有洞察时才找我"），实现上是 A。C 是优化项，不影响核心体验，后续再加。
+
+#### 搜索精准度：宁缺毋滥
+
+agent 搜索现成 skill 时必须高精准度匹配。反例：用户只是写了一份述职报告，就把任意"报告模板" skill 推荐过去——这种宽泛匹配无意义，反而损害信任。agent 需要真正理解用户的行为模式，而不是做关键词匹配。
+
+#### 创建流程：为什么是"先描述再创建"？
+
+讨论过的方案：
+- A: 展示 SKILL.md 草稿，等用户确认
+- B: 直接创建并激活，事后告知
+- C: 用自然语言描述打算创建的 skill，用户确认后再生成
+
+我们最后选 C。A 的问题是 SKILL.md 对非技术用户是天书。B 是先斩后奏，缺乏信任感（和之前排除"静默生效"的理由一致）。C 最自然——agent 用人话说"我打算做什么、它会怎么工作"，用户回复"好"或"好但再加个 XX"，全程不接触技术细节。
+
+示例对话：
+> agent："我注意到你每周都会整理项目进展，格式都差不多——标题、本周亮点、遇到的问题、下周计划。我可以帮你创建一个专门的技能，以后你只需要说'帮我写周报'就行。要我创建吗？"
+> 用户："好，但是再加一个'需要协助的事项'"
+> agent："好的，已创建。下次你说'写周报'我就会用这个模板。"
+
+#### 存储位置：为什么是 Deskhand 专属目录？
+
+讨论过的方案：
+- A: Deskhand 专属 skills 目录 — Deskhand 专属
+- B: Claude 默认 skills 目录 — 和 Claude Code 共享
+- C: 让用户选
+
+我们最后选 A。自动生成的 skill 来自用户在 Deskhand 里的行为模式，放到 Claude 默认 skills 目录 会污染 Claude Code 环境——一个"写周报" skill 在 CLI 里未必有意义。方向是单向兼容的：Claude Code 的 skill → Deskhand 能用（Q8），Deskhand 生成的 skill → 不反向污染 Claude Code。
+
+### 完整流程
+
+定期后台分析用户对话历史 → 发现有价值的行为模式？→ 否：不出声 → 是：创建新 session + 未读提醒 → agent 展示行为模式分析报告 + 建议 → 搜索是否有匹配的现成 skill（高精准度）→ 有：推荐 + 理由，用户确认后安装 → 没有：用自然语言描述打算创建的 skill → 用户在对话中确认/修改/拒绝 → 确认后生成 skill，存到 Deskhand 专属 skills 目录
+
+---
+
+## Q10: Claude Code 的 /insights 命令给了我们哪些启发？
+
+**结论：可借鉴 /insights 的多阶段 pipeline：facet 提取、缓存、并行分析和汇总。**
+
+### 发现
+
+Claude Code 内置了 `/insights` 命令，功能与我们的 Skill Insight Agent 高度相关。通过探查其实现，梳理出完整流程：
+
+- 读取 Claude 本地数据目录 下的所有历史会话数据
+- 对每个 session 提取元数据（工具调用次数、token 用量、语言分布、git 操作、响应时间等）——纯本地计算
+- 用 Claude 模型对每个 session 做 facet extraction——让模型判断用户目标、满意度、摩擦点、session 类型等，输出结构化 JSON
+- 汇总所有 session 的统计数据
+- 把汇总数据分发给多个并行的 prompt（project_areas、interaction_style、what_works、friction_analysis、suggestions、on_the_horizon、fun_ending 等维度），每个维度用一个独立的 Claude API 调用生成分析
+- 最后跑一个 at_a_glance 汇总 prompt，把前面所有维度的结果综合成简短摘要
+- 所有结果拼装成 HTML 报告，写到本地可查看的分析报告文件
+
+本质上是一个多阶段 AI pipeline：本地统计 → 逐 session AI 提取（带缓存）→ 汇总 → 多维度并行分析 → 最终摘要。
+
+### 我们可以借鉴什么？
+
+**facet 提取 + 缓存机制**：先对每个 session 做结构化提取，缓存结果，再做跨 session 的模式分析。比直接把所有对话丢给 AI 分析高效得多。
+
+**多维度并行分析**：不同分析维度行跑，最后汇总用独立的 prompt 并。这个架构可以直接复用。
+
+### 我们比它更进一步的地方
+
+| 维度 | Claude Code /insights | Deskhand Skill Insight Agent |
+|------|----------------------|------------------------------|
+| 触发方式 | 手动（用户输入 /insights） | 定期自动触发 |
+| 输出形式 | 静态 HTML 报告 | 可交互的 session 对话 |
+| 后续动作 | 建议用户自己改 CLAUDE.md | 直接帮用户创建/安装 skill |
+| 目标用户 | 技术用户（需理解 CLAUDE.md） | 非技术用户（自然语言对话） |
+
+### 关键补充：静态报告作为前置步骤
+
+讨论后决定：Skill Insight Agent 的 session 应该先输出一份工作分析报告，再进行 skill 推荐/创建。
+
+- 报告是"诊断"，skill 推荐是"处方"——先让用户看到"我了解你的工作模式"，建立信任和上下文
+- 用户看到分析后可能自己就有想法："对，这个事情我确实经常做，能不能帮我优化？"
+- 报告本身就有价值，即使用户不需要新 skill
+
+### 更新后的完整流程
+
+定期后台分析用户对话历史 → 阶段 1：facet 提取（逐 session，带缓存）→ 阶段 2：跨 session 模式分析（多维度并行）→ 发现有价值的行为模式？→ 否：不出声 → 是：创建新 session + 未读提醒 → 先展示工作分析报告（你最近在做什么、怎么做的、哪里有摩擦）→ 基于分析，提出 skill 建议：→ 搜索匹配的现成 skill（高精准度）→ 推荐 → 没有匹配的 → 用自然语言描述打算创建的 skill → 用户在对话中确认/修改/拒绝 → 确认后生成 skill，存到 Deskhand 专属 skills 目录
+
+---
+
+## Q11: Skill Insight 方案应如何切分 Vertical Slice？
+
+**结论：不做任何配置，对话中 AI 自然使用内置 skill。**
+
+### 已完成
+
+- Q6: SDK plugin 集成 ✅
+- Q7: Skill tool 在 activity tree 展示 ✅
+- Q8: Claude Code skills 自动兼容 ✅
+
+### Slice A：内置精选 Skills
+
+- 来源：Q9 方案 1
+- 做什么：打包几个通用 SKILL.md，首次启动复制到 Deskhand 专属 skills 目录
+- 端到端验证：用户装完 app，不做任何配置，对话中 AI 自然使用内置 skill
+- 依赖：无
+- 复杂度：低
+
+### Slice B：find-skills 作为默认 skill
+
+- 来源：Q9 方案 3
+- 做什么：将 find-skills 的 SKILL.md 作为内置 skill 之一（Slice A 的一部分）
+- 端到端验证：用户说"帮我找个做 XX 的 skill"→ agent 搜索 → 展示结果 → 安装
+- 依赖：Slice A（复用内置 skill 的分发机制）
+- 复杂度：低
+
+### Slice C：Session 未读基础设施
+
+- 来源：Q9 5+6 的前置 + 会话管理系统
+- 做什么：实现 `hasUnread` 持久化 + `sessions:update-meta` IPC + 侧边栏未读标记 UI
+- 端到端验证：后台创建一个 session → 侧边栏出现未读标记 → 点击后标记消失
+- 依赖：无（但与会话管理系统有交叉）
+- 复杂度：中
+
+### Slice D：手动触发 Insight（先手动，后自动）
+
+- 来源：Q9 5+6 + Q10
+- 做什么：手动触发版本，验证分析质量。实现 facet 提取 + 缓存 + 多维度并行分析 + 在新 session 里展示工作分析报告
+- 端到端验证：用户触发分析 → 新 session 出现（带未读标记）→ 里面有工作分析报告 → 可以对话互动
+- 依赖：Slice C
+- 为什么先手动：先验证分析质量再自动化，避免自动推送低质量内容损害信任
+- 复杂度：高
+
+### Slice E：Skill 推荐 + 创建
+
+- 来源：Q9 5+6
+- 做什么：在 Slice D 的报告基础上，增加 skill 搜索推荐（高精准度）和自动创建能力（先描述再创建）
+- 端到端验证：报告后 agent 建议 skill → 用户确认/修改 → skill 安装/创建到 Deskhand 专属 skills 目录 → 下次对话自动可用
+- 依赖：Slice D + Slice B（搜索用 find-skills）
+- 复杂度：中
+
+### Slice F：定期自动触发
+
+- 来源：Q9 5+6 触发条件
+- 做什么：把 Slice D 从手动改为定期自动 + 质量门槛（没有有价值的发现就不出声）
+- 端到端验证：用户什么都不做 → 一段时间后收到未读提醒 → 打开是分析报告 + 建议
+- 依赖： Slice D + Slice E
+- 复杂度：中
+
+### 依赖关系
+
+Slice A（内置 skills）──→ Slice B（find-skills）──→ Slice E（推荐+创建）
+Slice C（未读基础设施）──→ Slice D（手动 insight）──→ Slice E ──→ Slice F（自动触发）
+
+A/B 和 C 可以并行开发，互不依赖。
+
+---
+
+## Q12: 首批内置哪些 Skills 最合适？
+
+**结论：首批内置 skills 选择 playground、find-skills、skill-creator、frontend-design。**
+
+### 选择过程
+
+分析了 skills.sh 榜单 Top 10（总安装量 39K+），发现榜单用户群体是开发者，Top 10 几乎全是开发向（React、Remotion、Vercel 等）。需要结合 Deskhand 非技术用户的需求筛选。
+
+排除的：
+- vercel-react-best-practices、remotion-best-practices、vercel-composition-patterns、vercel-react-native-skills — 框架/平台专用，非技术用户用不上
+- agent-browser、browser-use — 需要浏览器自动化基础设施，Deskhand 暂不支持
+- web-design-guidelines — 和 frontend-design 重叠度高
+
+### 最终选择（4 个）
+
+核心原则：一切尽可能 AI Native，不需要 UI 操作，用户直接跟 AI 讲就行。
+
+**1. playground**（来源：Anthropic 官方插件）
+- 解决的问题：用户不知道如何表达需求 → AI 用可交互的可视化工具帮你表达
+- 生成自包含 HTML 文件，有控件、实时预览、prompt 输出
+- 内置多种模板（设计、数据、概念图、文档评审等）
+- 来源：`anthropics/skills` 官方插件系统
+
+**2. find-skills**（来源：vercel-labs/skills）
+- 解决的问题：用户不需要学习如何寻找 skill → 直接跟 AI 说"帮我找个做 XX 的"
+- 搜索 skills.sh 生态，展示结果，用户确认后安装
+- 已在 Q9 中确定作为 Slice B
+- 来源：https://github.com/vercel-labs/skills/blob/main/skills/find-skills/
+
+**3. skill-creator**（来源：Anthropic 官方）
+- 解决的问题：用户不需要学习如何创建 skill、看晦涩文档 → 直接跟 AI 描述需求
+- 提供完整的 skill 创建指南，包括初始化、编辑、打包流程
+- 和 Slice E（Skill Insight Agent 的自动创建能力）天然对齐
+- 来源：https://github.com/anthropics/skills/blob/main/skills/skill-creator/
+
+**4. frontend-design**（来源：Anthropic 官方插件）
+- 解决的问题：非技术用户做网页的刚需（落地页、简历页、小商家网站等）
+- 强调避免"AI 味"设计，生成有设计感的前端代码
+- 来源：`anthropics/skills` 官方插件系统
+
+### 设计哲学
+
+这 4 个 skill 构成了一个完整的"AI Native 能力层"：
+
+用户不会表达 ──→ playground 帮你可视化表达
+用户不会找 skill ──→ find-skills 帮你搜索安装
+用户不会建 skill ──→ skill-creator 帮你创建
+用户要做网页 ──→ frontend-design 帮你设计
+
+用户不需要知道"skill"这个概念的存在，只需要自然地和 AI 对话，内置 skill 会在合适的时机被 SDK 自动激活。
+
+---
+
+## Q13: Skill Insight Agent 的上下文问题怎么解决？
+
+**结论：核心问题：如果把所有 session 的消息历史灌给一个 Agent，上下文肯定炸。**
+
+核心问题：如果把所有 session 的消息历史灌给一个 Agent，上下文肯定炸。
+
+解决方案：
+
+Stage 1 (Map): 逐 session 独立提取 facet
+  → 每个 session 单独一次 AI 调用，输出结构化 JSON（约 200-300 tokens）
+  → 结果缓存，已分析过的不重复跑
+
+Stage 2 (Reduce): 只把提取出的 facet 汇总
+  → 50 个 facet × ~300 tokens ≈ 1.5 万 tokens，一个上下文窗口轻松装下
+  → 找出跨 session 的重复模式，而不是每个 session 单独推荐
+
+关键洞察：50 个 session 不是推荐 50 个 skill。只有**重复出现**的模式才有价值——"用户过去一个月写了 8 次周报，结构都一样"才值得变成 skill，偶尔做一次的事不值得。
+
+---
+
+## Q14: 单个 Session 的 Facet 提取方式？
+
+**结论：我们最后选A，一次调用。**
+
+讨论过的方案：
+- A: 一次调用 — 把单个 session 的完整消息喂给 AI，输出结构化 facet JSON（用户目标、任务类型、重复模式、摩擦点）。大部分 session 几十轮对话，token 量可控。极少数超长 session 做智能截断。
+- B: 两次调用 — 先用便宜模型压缩摘要，再用主模型从摘要中提取 facet。省 token 但多一轮调用，且压缩过程可能丢失对 skill 发现有价值的细节。
+
+我们最后选 A。
+- 大部分 session 一次调用就够
+- 信息无损，不会因为压缩丢失 skill 发现线索
+- 超长 session 是边缘 case，截断处理即可
+
+注意：facet 提取的目标是"发现用户反复做的事，推荐或创建 skill"，不是做使用统计。消息数量、工具调用次数、时长等指标对 skill 发现毫无帮助，需要的是语义理解。
+
+---
+
+## Q15: 跨 Session 分析的维度？
+
+**结论：我们最后选A，单一 prompt。**
+
+讨论过的方案：
+- A: 单一 prompt — 一个 prompt 搞定，让 AI 自己判断哪些模式值得提取
+- B: 多维度并行 — 像 Claude Code /insights 那样拆成几个独立 prompt 并行跑
+
+我们最后选 A。
+- 我们的目标很聚焦（找 skill 机会），不像 Claude Code 的 /insights 要做全面画像
+- 一个精心设计的 prompt 就够了，不需要多维度并行的复杂度
+
+---
+
+## Q16: 手动触发的入口？
+
+**结论：手动触发只是开发阶段验证分析质量用的，不上线。**
+
+手动触发只是开发阶段验证分析质量用的，不上线。直接用 IPC 调用或 devtools console 触发即可。Slice F（自动触发）上线后这个入口就不重要了。
+
+---
+
+## Q17: Facet 缓存存哪？
+
+**结论：我们最后选A，每个 session 目录下存 .facet.json。**
+
+讨论过的方案：
+- A: 每个 session 目录下存 `.facet.json` — 和 session 数据放一起，session 删了缓存自然跟着删
+- B: 统一存到 `~/.deskhand/cache/facets/` — 集中管理，和 session 数据解耦
+
+我们最后选 A。
+- 缓存跟着 session 走，生命周期一致，零维护成本
+
+---
+
+## Q18: Facet 提取和跨 Session 分析分别用什么模型？
+
+**结论：我们最后选A，Haiku。**
+
+讨论过的方案：
+- A: Haiku — 最便宜最快，适合批量处理。facet 提取是结构化任务，Haiku 够用
+- B: Sonnet — 贵一点但理解力更强
+
+我们最后选 A。
+- facet 提取是相对简单的结构化提取任务，Haiku 性价比最高
+- Stage 2 的跨 session 模式分析用 Sonnet（需要更强的推理能力，但只有一次调用）
+
+---
+
+## Q19: Insight Session 的报告怎么生成？用户回复怎么处理？
+
+**结论：围绕「InsightSession的报」，最终方案按文中取舍执行。**
+
+报告生成：
+- A: 预生成 — Stage 2 的输出直接作为新 session 的第一条 assistant 消息存入。用户打开就能看到，不需要再调 AI。
+- B: 实时生成 — 创建空 session，让 agent 实时生成报告。多一次 AI 调用且内容本质一样。
+
+我们最后选 A。分析结果已经有了，没必要再让 AI 重新说一遍。
+
+用户回复处理：
+- A: 不做特殊处理 — 正常 agent 对话，报告作为历史消息自然提供上下文
+- B: 注入额外 system context — 给 agent 额外注入角色提示
+
+我们最后选 A。Slice D 的目标是验证分析质量，不是做完整的互动体验。角色注入是 Slice E/F 的优化项。
+
+---
+
+## Q20: Skill 推荐的时机？
+
+**结论：我们最后选A，Pipeline 阶段自动搜索。**
+
+讨论过的方案：
+- A: Pipeline 阶段自动搜索 — Stage 2 之后加 Stage 3，对每个 pattern 跑 `skills find` 命令，搜索结果写进报告
+- B: 报告里只给建议描述，用户回复后对话式搜索
+- C: 报告里给推荐搜索关键词，不实际搜索
+
+我们最后选 A。
+- 既然已经知道用户的模式，直接搜好呈现结果，减少用户操作步骤
+- 非技术用户不应该需要自己想搜索词
+
+---
+
+## Q21: 搜索不到现成 Skill 时怎么办？
+
+**结论：我们最后选B，报告里给出创建建议（含详细描述）。**
+
+讨论过的方案：
+- A: 自动创建 skill — 全自动但可能创建出低质量 skill
+- B: 报告里给出创建建议（含详细描述），用户确认后 agent 创建
+- C: 只报告，不主动创建
+
+我们最后选 B。
+- 自动创建风险太高（质量不可控）
+- 完全不管又浪费了分析结果
+- 给出建议 + 用户确认是最好的平衡
+
+关键 UX 要求：不能只给一个 skill 名称，必须用自然语言描述这个 skill 会做什么、怎么帮到用户。用户需要理解价值才能做决定。
+
+---
+
+## Q22: 报告的语言和交互设计？
+
+**结论：需要说"好"或点按钮，agent 在后台执行。**
+
+核心原则：
+- 不暴露 "skill"、"npx"、"命令" 等技术术语
+- 用"工具""偏好""帮你记住"这种自然语言
+- 用户只需要说"好"或点按钮，agent 在后台执行
+
+报告示例：
+
+## 模式 1：周报生成（3次会话）
+你经常让我帮你写周报，而且格式都一样：标题、亮点、问题、下周计划。
+
+### ✅ 有现成的方案
+我找到了一个专门做周报的工具，装上之后你只需要告诉我这周做了什么，
+我就自动按你习惯的格式生成。要不要我帮你装上？
+
+### 💡 可以帮你记住偏好（没有现成方案时）
+我可以帮你把这些偏好记下来：深色主题 + 响应式布局 + hero + pricing。
+以后你只需要说"帮我做个落地页"，我就自动按这些偏好来。
+
+---
+
+## Q23: 推荐 UI 的形式？
+
+**结论：我们最后选A，消息内嵌按钮。**
+
+讨论过的方案：
+- A: 消息内嵌按钮 — 在 assistant 消息末尾渲染按钮，类似权限确认 UI
+- B: 独立卡片组件 — 特殊的推荐卡片，视觉上和普通消息区分
+- C: 底部快捷回复 — 输入框上方显示预设回复选项
+
+我们最后选 A。
+- 复用权限确认的 UI 模式，开发成本最低
+- 用户已经熟悉这个交互模式
+- 一次只推荐一个，不需要复杂的卡片布局
+
+额外决策：一次只推荐一个（最高频的模式），不要信息轰炸。
+
+---
+
+## Q24: 用户点击"帮我装上"后，安装流程怎么走？
+
+**结论：我们最后选B，点击按钮等于自动发送预设消息。**
+
+讨论过的方案：
+- A: 主进程直接执行 系统命令执行能力 — 简单但绕过 agent
+- B: 点击按钮等于自动发送预设消息，agent 用 Bash 工具执行安装
+
+我们最后选 B。
+- Agent 知道上下文，安装失败时能自动排查、换方案
+- 非技术用户不可能自己 debug 安装报错
+- 主进程直接跑出错了还得自己写错误处理逻辑，不如让 agent 兜底
+
+---
+
+## Q25: "建议创建"场景，agent 怎么创建 Skill？
+
+**结论：我们最后选A，只讲一个 pattern。**
+
+不需要 skill-creator（那是和用户协作创建用的），也不需要 init/package 流程。
+
+一个正规 skill 的最小结构：
+skill-name/
+└── SKILL.md    # frontmatter (name + description) + 指令正文
+
+scripts/references/assets 都是可选的。对于"记住用户偏好"这类简单 skill，一个 SKILL.md 就够了。
+
+Agent 从 insight 分析中已有足够信息生成完整的 SKILL.md（frontmatter + 触发描述 + 执行指令）。创建完成后下次对话自动可用（SDK 启动时扫描 Deskhand 专属 skills 目录）。
+
+---
+
+## Slice E 完整流程
+
+> ⚠️ 以下为 v2 架构（Q26-Q28 修正后）。v1 的 Stage 2+3+硬编码方案已废弃。
+
+### 架构修正背景（Q26-Q28）
+
+v1 实现中发现的问题：
+- Stage 2（Sonnet 分析）和 Stage 3（npx skills find）是割裂的，Stage 2 写报告时不知道搜索结果
+- 推荐文案拼接逻辑 硬编码推荐文案，和 AI 生成的报告语气不一致
+- 报告列出多个 pattern 但推荐只针对一个，用户不知道在解决哪个问题
+- 推荐的 skill 只有名字没有描述，用户不敢装
+
+### Q26: 报告聚焦范围？
+
+只聚焦最高频的一个 pattern。
+
+- A: 只讲一个 pattern，从分析到推荐一条线贯穿 ✅
+- B: 展示所有 pattern，推荐部分标注针对哪个
+
+我们最后选 A。信息不分散，用户不会困惑"你到底在解决哪个问题"。
+
+### Q27: 分析 + 搜索 + 报告生成的架构？
+
+合并为单个 Agent 调用，用 DeskhandAgent + find-skills skill。
+
+v1 流程（已废弃）：
+Stage 2: Sonnet 分析 patterns → 生成 report（不知道搜索结果）
+Stage 3: 代码调用 npx skills find（AI 不参与）
+推荐文案拼接逻辑: 硬编码拼接推荐文案
+
+v2 流程：
+Stage 1: Haiku 逐 session 提取 facet（不变，批量预处理 + 缓存）
+Stage 2: 创建 insight session → DeskhandAgent 接收 facets + prompt
+  → Agent 自己分析模式（聚焦最高频的一个）
+  → Agent 自然调用 find-skills 搜索匹配的 skill
+  → Agent 评估搜索结果是否真的匹配
+  → Agent 写出完整报告 + 推荐
+  → 报告末尾输出结构化 JSON 标记推荐动作
+  → 我们解析 JSON → 转为 UI action 按钮
+
+- AI 全程有上下文，报告自然连贯
+- 不需要 多段硬编码分析与推荐脚本
+- find-skills 已是内置 skill，agent 直接可用
+- 用户回复时 agent 已有完整分析记忆
+
+### Q28: Agent 中间过程是否对用户可见？
+
+可见。Activity Tree 里展示搜索步骤。
+
+- A: 只看到最终报告
+- B: 能看到完整过程（Activity Tree 里有 find-skills 搜索步骤）✅
+
+我们最后选 B。用户能看到"AI 搜索了什么、找到了什么"，增加透明度和信任感。
+
+---
+
+## Slice F: 定期自动触发
+
+### Q29: 触发的时机用什么方式？
+
+每次对话结束后检查。
+
+讨论过的方案：
+- A: 每次对话结束后检查 — agent.chat() 完成后，检查是否满足触发条件。自然嵌入现有流程，不需要额外定时器。
+- B: 定时器轮询 — app 启动时 setInterval，每 24 小时检查一次。时间精确但用户不用 app 时白跑。
+- C: App 启动时检查 — 每次打开 app 时检查。简单但用户一直不关 app 就永远不触发。
+
+我们最后选 A。
+- 不引入新的定时器机制，复用现有对话流程
+- 触发频率自然跟用户活跃度挂钩——用得多分析得多，不用就不打扰
+- 实现最简单，在 主进程消息处理流程 的 聊天请求结束节点 末尾加一个异步检查即可
+
+### Q30: 触发的阈值用什么？
+
+对话次数，每 20 次新对话触发一次。
+
+讨论过的方案：
+- A: 对话次数 — 每完成 N 次对话后触发。跟用户实际使用频率挂钩。
+- B: 时间间隔 — 距离上次 insight 超过 N 天。节奏固定但可能数据量不够。
+- C: 两者结合 — 至少 N 次对话 AND 至少间隔 M 天。
+
+我们最后选 A，并把 N 定为 20。
+- 20 个对话里出现 3+ 次的模式比 10 个里出现 2 次的更可信
+- 普通用户大概 1-2 周触发一次，重度用户 3-5 天一次，都不算打扰
+- 加上质量门槛（没发现有价值的模式就不出声），实际推送频率更低
+
+为什么不是 10：用户提出了 skill 膨胀问题——如果推送太频繁，长期积累下来 skill 越来越多（10 个、20 个），反而成为负担。20 次的间隔在"数据充足"和"不打扰"之间取得更好的平衡。
+
+### Q31: 如何避免重复推荐同一个模式？
+
+只分析上次 insight 之后的新 session。
+
+讨论过的方案：
+- A: 只分析新对话 — 每次 insight 只看 上次 insight 时间戳 之后的新 session。同一个模式不会被反复发现。
+- B: 记录已推荐的模式 — 维护"已推荐列表"，下次分析时排除。更精确但多一层状态管理。
+- C: 设上限 — 自动创建的 skill 最多 N 个，到上限后停止推送。
+
+我们最后选 A。
+- 如果上次发现了重复模式，用户接受了 → 再推荐没意义
+- 如果用户不接受 → 再推荐也没意义
+- 自然避免重复推荐，不需要额外的状态管理
+- 如果老模式在新对话中又出现，说明用户没采纳上次建议，不该再烦他
+
+### Q32: "上次 insight"的状态存哪？
+
+存到 config 文件，加 上次 insight 时间戳 字段。
+
+讨论过的方案：
+- A: 存到 config 文件 — 复用现有 Deskhand 配置文件，加一个上次 insight 时间戳字段。
+- B: 存到独立状态文件，专门记录 insight 相关状态。
+
+我们最后选 A。
+- 复用现有持久化机制，零额外基础设施
+- 只需要一个时间戳字段，不值得单独开文件
+
+---
+
+## 最小链路实现（v1 - 已废弃）
+
+> 以下为 Q2 时的设计，已被 Q6 修正。保留作为决策记录。
+
+**端到端流程：**
+
+本地 skills 目录 → 主进程加载技能清单 → 前端展示并允许勾选
+→ 用户发消息时附带所选技能信息 → agent 按配置执行
+
+**实现步骤（vertical slice）：**
+
+- **加载通道** — 建立技能清单的主进程到前端通信
+- **状态层** — 维护技能列表和启停状态，并从配置初始化
+- **启动加载** — 应用启动时拉取技能并写入状态
+- **弹窗接真数据** — 替换 mock，直接读取真实状态并支持勾选切换
+- **InputToolbar badge** — 显示已启用技能数量（总数 - disabled 数）
+- **消息注入** — 发消息时附带所选技能内容
+- **持久化** — 技能开关变化时写回配置文件

@@ -1,0 +1,24 @@
+---
+interface Props {
+  slug: string;
+  title: string;
+  description: string;
+  docsCount: number;
+  qaCount: number;
+  accent: string;
+}
+
+const { slug, title, description, docsCount, qaCount, accent } = Astro.props;
+---
+
+<a class="topic-card animate-lift-in" href={`/${slug}/`} style={`--tone:${accent};`}>
+  <div class="topic-meta">
+    <h3 class="topic-title">{title}</h3>
+    <span class="topic-count">{docsCount} 篇文档</span>
+  </div>
+  <p class="topic-desc">{description}</p>
+  <div class="topic-stats">
+    <span class="tiny-tag">{qaCount} 个 QA 决策</span>
+    <span class="tiny-tag">进入专题</span>
+  </div>
+</a>

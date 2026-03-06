@@ -1,0 +1,35 @@
+---
+interface Props {
+  days: number;
+  commits: number;
+  lines: number;
+  qaCount: number;
+}
+
+const { days, commits, lines, qaCount } = Astro.props;
+
+const cards = [
+  { code: "DAYS", label: "开发天数", value: `${days} 天` },
+  { code: "QA", label: "设计决策", value: `${qaCount} 个` },
+  { code: "LOC", label: "代码行数", value: `${lines.toLocaleString()} 行` },
+  { code: "COMMITS", label: "提交次数", value: `${commits.toLocaleString()} 次` }
+];
+---
+
+<section class="mt-4">
+  <div class="section-title">项目仪表盘</div>
+  <p class="section-sub">构建期从 Deskhand 仓库和专栏内容自动抓取</p>
+  <div class="stat-grid">
+    {
+      cards.map((card) => (
+        <article class="stat-card">
+          <div class="stat-top">
+            <span class="stat-code">{card.code}</span>
+          </div>
+          <div class="stat-value">{card.value}</div>
+          <div class="stat-label">{card.label}</div>
+        </article>
+      ))
+    }
+  </div>
+</section>

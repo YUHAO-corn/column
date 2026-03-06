@@ -1,0 +1,20 @@
+---
+interface Props {
+  href: string;
+  questionTag: string;
+  question: string;
+  preview: string;
+  docTitle: string;
+}
+
+const { href, questionTag, question, preview, docTitle } = Astro.props;
+---
+
+<a class="qa-row" href={href}>
+  <div class="qa-row-head">
+    <span class="qa-tag">{questionTag}</span>
+    <span class="qa-doc">{docTitle}</span>
+  </div>
+  <h3 class="qa-title">{question}</h3>
+  <p class="qa-preview">{preview}</p>
+</a>
