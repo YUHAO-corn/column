@@ -10,9 +10,10 @@ export interface SiteStats {
   qaCount: number;
 }
 
-const DESKHAND_PATH = "/Users/godcorn/cursor/Deskhand";
-const SOURCE_PATH = path.join(DESKHAND_PATH, "apps/electron/src");
 const utilsDir = path.dirname(fileURLToPath(import.meta.url));
+const defaultDeskhandPath = path.resolve(utilsDir, "../../../Deskhand");
+const DESKHAND_PATH = process.env.DESKHAND_PATH ?? defaultDeskhandPath;
+const SOURCE_PATH = process.env.DESKHAND_SOURCE_PATH ?? path.join(DESKHAND_PATH, "apps/electron/src");
 const CONTENT_PATH = path.resolve(utilsDir, "../../content");
 
 function safeExec(command: string, cwd: string): string {
